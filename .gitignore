@@ -1,0 +1,27 @@
+# Windows thumbnail cache & desktop files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+
+# OS generated files
+.DS_Store
+.Spotlight-V100
+.Trashes
+
+# Editor & IDE directories
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# WoW SavedVariables & backups (if tested directly inside WoW directory)
+*.bak
+*.orig
+*.swp
+*.wtf
+SavedVariables/

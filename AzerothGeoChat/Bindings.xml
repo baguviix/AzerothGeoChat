@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="AZEROTHGEOCHAT_TOGGLE" header="AzerothGeoChat">
+		AzerothGeoChat_Toggle();
+	</Binding>
+</Bindings>

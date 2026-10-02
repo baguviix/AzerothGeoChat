@@ -1,0 +1,472 @@
+--[[--------------------------------------------------------------------
+	AzerothGeoChat v1.1.0
+	Georgian (Mkhedruli) chat transliteration & font support for WoW 3.3.5a
+	Author: Azeroth Reborn
+
+	Why this addon exists:
+	The 3.3.5a client on Windows/DirectX 9 cannot receive non-ANSI Windows
+	keyboard input directly in game edit boxes. This addon intercepts typed
+	keystrokes and converts them on-the-fly into Georgian Unicode Mkhedruli
+	characters (U+10D0..U+10FA).
+
+	Requirements:
+	Rendering Georgian characters without question marks (??????) requires
+	installing a Georgian-compatible TTF font (e.g. Sylfaen / Segoe UI) in
+	the "World of Warcraft/Fonts/" folder (see README.md).
+----------------------------------------------------------------------]]
+
+----------------------------------------------------------------------
+-- Georgian QWERTY (Mkhedruli) Mapping
+----------------------------------------------------------------------
+local GEO_MAP = {
+	-- Standard lowercase Mkhedruli (33 letters)
+	["a"] = "ა", ["b"] = "ბ", ["g"] = "გ", ["d"] = "დ", ["e"] = "ე",
+	["v"] = "ვ", ["z"] = "ზ", ["t"] = "ტ", ["i"] = "ი", ["k"] = "კ",
+	["l"] = "ლ", ["m"] = "მ", ["n"] = "ნ", ["o"] = "ო", ["p"] = "პ",
+	["r"] = "რ", ["s"] = "ს", ["u"] = "უ", ["f"] = "ფ", ["q"] = "ქ",
+	["y"] = "ყ", ["c"] = "ც", ["w"] = "წ", ["x"] = "ხ", ["j"] = "ჯ",
+	["h"] = "ჰ",
+
+	-- Shifted keys in standard Georgian (QWERTY) layout
+	["T"] = "თ",
+	["J"] = "ჟ",
+	["R"] = "ღ",
+	["S"] = "შ",
+	["C"] = "ჩ",
+	["Z"] = "ძ",
+	["W"] = "ჭ",
+
+	-- Smart CapsLock & Shift fallbacks
+	-- Maps remaining uppercase Latin letters to their Georgian equivalents
+	-- so accidental CapsLock or initial Shift won't produce broken mixed text.
+	["A"] = "ა", ["B"] = "ბ", ["G"] = "გ", ["D"] = "დ", ["E"] = "ე",
+	["V"] = "ვ", ["I"] = "ი", ["K"] = "კ", ["L"] = "ლ", ["M"] = "მ",
+	["N"] = "ნ", ["O"] = "ო", ["P"] = "პ", ["U"] = "უ", ["F"] = "ფ",
+	["Q"] = "ქ", ["Y"] = "ყ", ["X"] = "ხ", ["H"] = "ჰ",
+}
+
+-- Reverse mapping for Georgian -> Latin conversion
+local REV_MAP = {
+	["ა"] = "a", ["ბ"] = "b", ["გ"] = "g", ["დ"] = "d", ["ე"] = "e",
+	["ვ"] = "v", ["ზ"] = "z", ["თ"] = "T", ["ტ"] = "t", ["ი"] = "i",
+	["კ"] = "k", ["ლ"] = "l", ["მ"] = "m", ["ნ"] = "n", ["ო"] = "o",
+	["პ"] = "p", ["ჟ"] = "J", ["რ"] = "r", ["ს"] = "s", ["უ"] = "u",
+	["ფ"] = "f", ["ქ"] = "q", ["ღ"] = "R", ["ყ"] = "y", ["შ"] = "S",
+	["ჩ"] = "C", ["ც"] = "c", ["ძ"] = "Z", ["წ"] = "w", ["ჭ"] = "W",
+	["ხ"] = "x", ["ჯ"] = "j", ["ჰ"] = "h",
+}
+
+----------------------------------------------------------------------
+-- Slash Command Rules
+----------------------------------------------------------------------
+-- Channel commands where message text starts right after 1st space
+local CHAT_COMMANDS = {
+	["/s"] = true, ["/say"] = true,
+	["/y"] = true, ["/yell"] = true,
+	["/p"] = true, ["/party"] = true,
+	["/g"] = true, ["/guild"] = true, ["/gc"] = true,
+	["/ra"] = true, ["/raid"] = true,
+	["/rw"] = true, ["/raidwarning"] = true,
+	["/bg"] = true, ["/battleground"] = true,
+	["/o"] = true, ["/officer"] = true,
+	["/e"] = true, ["/me"] = true, ["/emote"] = true,
+}
+for i = 1, 10 do
+	CHAT_COMMANDS["/" .. i] = true
+end
+
+-- Whisper commands where argument 1 is player name, message starts after 2nd space
+local WHISPER_COMMANDS = {
+	["/w"] = true, ["/whisper"] = true,
+	["/t"] = true, ["/tell"] = true,
+}
+
+----------------------------------------------------------------------
+-- Keybindings Strings (Options -> Key Bindings -> AzerothGeoChat)
+----------------------------------------------------------------------
+BINDING_HEADER_AZEROTHGEOCHAT         = "AzerothGeoChat"
+BINDING_NAME_AZEROTHGEOCHAT_TOGGLE    = "Toggle Georgian / English input"
+BINDING_NAME_AZEROTHGEOCHAT_CONVERT   = "Convert typed text (Latin <-> Geo)"
+
+----------------------------------------------------------------------
+-- Database & Helpers
+----------------------------------------------------------------------
+AzerothGeoChatDB = AzerothGeoChatDB or { enabled = true }
+
+local function Print(msg)
+	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99AzerothGeoChat|r: " .. msg)
+end
+
+-- Check if cursor position is inside a WoW hyperlink |c...|H...|h[...]...|h|r
+local function IsInsideHyperlink(text, pos)
+	if not text or pos <= 0 then return false end
+	local sub = text:sub(1, pos)
+	local linkStart = sub:match("^.*()|H")
+	if linkStart then
+		local linkEnd = text:find("|h", linkStart, true)
+		if linkEnd then
+			local secondH = text:find("|h", linkEnd + 2, true)
+			if secondH and pos <= secondH + 4 then
+				return true
+			elseif pos <= linkEnd + 2 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+----------------------------------------------------------------------
+-- In-Place Text Transliteration (Latin <-> Georgian)
+----------------------------------------------------------------------
+local function TransliterateString(text)
+	if not text or text == "" then return text end
+
+	-- Check if text already contains Georgian characters (UTF-8 sequence \225\131)
+	local hasGeorgian = text:find("\225\131")
+
+	-- If it starts with a slash command, preserve the command/target name
+	local prefix = ""
+	local body = text
+	if text:sub(1, 1) == "/" then
+		local firstSpace = text:find(" ", 1, true)
+		if firstSpace then
+			local cmd = text:sub(1, firstSpace - 1):lower()
+			if CHAT_COMMANDS[cmd] then
+				prefix = text:sub(1, firstSpace)
+				body = text:sub(firstSpace + 1)
+			elseif WHISPER_COMMANDS[cmd] then
+				local secondSpace = text:find(" ", firstSpace + 1, true)
+				if secondSpace then
+					prefix = text:sub(1, secondSpace)
+					body = text:sub(secondSpace + 1)
+				else
+					return text -- only name typed, no message
+				end
+			else
+				return text -- non-chat slash command
+			end
+		else
+			return text
+		end
+	end
+
+	-- Extract hyperlinks and protect them
+	local links = {}
+	local linkCount = 0
+	local placeholderPattern = "\001LNK%d+\002"
+
+	body = body:gsub("(|c%x+|H.-|h.-|h|r)", function(link)
+		linkCount = linkCount + 1
+		links[linkCount] = link
+		return string.format("\001LNK%d\002", linkCount)
+	end)
+
+	if hasGeorgian then
+		-- Convert Georgian -> Latin
+		for geoChar, latChar in pairs(REV_MAP) do
+			body = body:gsub(geoChar, latChar)
+		end
+	else
+		-- Convert Latin -> Georgian
+		-- Check shifted/digraph keys first, then regular letters
+		body = body:gsub("[a-zA-Z]", function(c)
+			return GEO_MAP[c] or c
+		end)
+	end
+
+	-- Restore protected hyperlinks
+	body = body:gsub("\001LNK(%d+)\002", function(id)
+		return links[tonumber(id)] or ""
+	end)
+
+	return prefix .. body
+end
+
+function AzerothGeoChat_ConvertCurrentEditBox()
+	-- Find currently focused or active edit box
+	local editBox = GetFocus()
+	if not editBox or not editBox.IsObjectType or not editBox:IsObjectType("EditBox") then
+		if ChatEdit_GetActiveWindow then
+			editBox = ChatEdit_GetActiveWindow()
+		end
+	end
+
+	if editBox and editBox:IsShown() then
+		local currentText = editBox:GetText() or ""
+		if currentText ~= "" then
+			local converted = TransliterateString(currentText)
+			editBox:SetText(converted)
+			editBox:SetCursorPosition(string.len(converted))
+		end
+	else
+		Print("No active chat box found to convert. Open chat first.")
+	end
+end
+
+----------------------------------------------------------------------
+-- Core Character Replacement (EditBox OnChar Hook)
+----------------------------------------------------------------------
+local function Geo_OnChar(self, char)
+	if not AzerothGeoChatDB.enabled then return end
+
+	local mapped = GEO_MAP[char]
+	if not mapped then return end
+
+	local text = self:GetText() or ""
+	local pos  = self:GetCursorPosition() -- Character index right after typed char
+	if not pos or pos <= 0 then return end
+
+	-- Slash command protection
+	if text:sub(1, 1) == "/" then
+		local firstSpace = text:find(" ", 1, true)
+		if not firstSpace then
+			return -- Still typing the slash command itself
+		end
+
+		local cmd = text:sub(1, firstSpace - 1):lower()
+		if CHAT_COMMANDS[cmd] then
+			if pos <= firstSpace then return end
+		elseif WHISPER_COMMANDS[cmd] then
+			local secondSpace = text:find(" ", firstSpace + 1, true)
+			if not secondSpace or pos <= secondSpace then
+				return -- Still typing player name or second space
+			end
+		else
+			-- Non-chat command (/cast, /use, /target, /run, /script, etc.)
+			return
+		end
+	end
+
+	-- Hyperlink protection
+	if IsInsideHyperlink(text, pos) then
+		return
+	end
+
+	-- Safe in-place replacement:
+	-- Highlight the single character just inserted and replace with mapped Georgian char.
+	-- This completely avoids Lua byte-slicing errors and UTF-8 corruption!
+	self:HighlightText(pos - 1, pos)
+	self:Insert(mapped)
+end
+
+----------------------------------------------------------------------
+-- EditBox Hooking
+----------------------------------------------------------------------
+local function HookEditBox(box)
+	if not box or box.AzerothGeoChatHooked then return end
+	box.AzerothGeoChatHooked = true
+
+	local orig = box:GetScript("OnChar")
+	box:SetScript("OnChar", function(self, char)
+		if orig then orig(self, char) end
+		Geo_OnChar(self, char)
+	end)
+end
+
+local function HookAllEditBoxes()
+	-- Standard Chat Frames 1 to 10
+	for i = 1, NUM_CHAT_WINDOWS do
+		local box = _G["ChatFrame" .. i .. "EditBox"]
+		if box then HookEditBox(box) end
+	end
+
+	-- In-game Mail edit boxes
+	if SendMailSubjectEditBox then HookEditBox(SendMailSubjectEditBox) end
+	if SendMailBodyEditBox then HookEditBox(SendMailBodyEditBox) end
+	if OpenMailReplySubjectEditBox then HookEditBox(OpenMailReplySubjectEditBox) end
+	if OpenMailReplyBodyEditBox then HookEditBox(OpenMailReplyBodyEditBox) end
+
+	-- Macro editor
+	if MacroFrameText then HookEditBox(MacroFrameText) end
+
+	-- Guild Member Notes
+	if GuildMemberDetailFrameNoteEditBox then HookEditBox(GuildMemberDetailFrameNoteEditBox) end
+	if GuildMemberDetailFrameOfficerNoteEditBox then HookEditBox(GuildMemberDetailFrameOfficerNoteEditBox) end
+end
+
+----------------------------------------------------------------------
+-- UI Toggle Button ([GEO] / [ENG])
+----------------------------------------------------------------------
+local buttons = {}
+
+local function RefreshButtons()
+	local label, color
+	if AzerothGeoChatDB.enabled then
+		label, color = "GEO", "|cff00ff00"
+	else
+		label, color = "ENG", "|cff888888"
+	end
+	for _, btn in ipairs(buttons) do
+		btn:SetText(color .. "[" .. label .. "]|r")
+	end
+end
+
+local function CreateToggleButton(editBox)
+	if not editBox or editBox.AzerothGeoChatBtn then return end
+
+	local btn = CreateFrame("Button", nil, editBox)
+	editBox.AzerothGeoChatBtn = btn
+
+	btn:SetWidth(46)
+	btn:SetHeight(18)
+	btn:SetPoint("TOPLEFT", editBox, "TOPLEFT", 6, 16)
+	btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+	-- Subtle Blizzard-native backdrop
+	btn:SetBackdrop({
+		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 8, edgeSize = 8,
+		insets = { left = 2, right = 2, top = 2, bottom = 2 }
+	})
+	btn:SetBackdropColor(0, 0, 0, 0.75)
+	btn:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.8)
+
+	local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	fs:SetPoint("CENTER", 0, 0)
+	btn:SetFontString(fs)
+
+	btn:SetScript("OnClick", function(self, button)
+		if button == "RightButton" then
+			AzerothGeoChat_ConvertCurrentEditBox()
+		else
+			AzerothGeoChat_Toggle()
+		end
+		-- Re-focus editBox so clicking the button never closes the chat
+		if editBox:IsShown() then
+			editBox:SetFocus()
+		end
+	end)
+
+	btn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:AddLine("AzerothGeoChat", 0.2, 1.0, 0.6)
+		GameTooltip:AddLine("|cffffffffLeft-Click:|r Toggle Georgian / English input", 0.9, 0.9, 0.9)
+		GameTooltip:AddLine("|cffffffffRight-Click:|r Convert typed text (Latin <-> Geo)", 0.9, 0.9, 0.9)
+		GameTooltip:AddLine("|cff888888Slash commands: /geo, /geo c|r", 0.6, 0.6, 0.6)
+		GameTooltip:Show()
+	end)
+
+	btn:SetScript("OnLeave", function()
+		GameTooltip:Hide()
+	end)
+
+	tinsert(buttons, btn)
+end
+
+local function CreateAllToggleButtons()
+	for i = 1, NUM_CHAT_WINDOWS do
+		local box = _G["ChatFrame" .. i .. "EditBox"]
+		if box then CreateToggleButton(box) end
+	end
+	RefreshButtons()
+end
+
+----------------------------------------------------------------------
+-- Toggle & Slash Command Handlers
+----------------------------------------------------------------------
+function AzerothGeoChat_Toggle(force)
+	if force ~= nil then
+		AzerothGeoChatDB.enabled = not not force
+	else
+		AzerothGeoChatDB.enabled = not AzerothGeoChatDB.enabled
+	end
+	RefreshButtons()
+	if AzerothGeoChatDB.enabled then
+		Print("Georgian input |cff00ff00[ON]|r (QWERTY -> მხედრული)")
+	else
+		Print("Georgian input |cff888888[OFF]|r (English input)")
+	end
+end
+
+SLASH_AZEROTHGEOCHAT1 = "/geo"
+SLASH_AZEROTHGEOCHAT2 = "/geochat"
+SlashCmdList.AZEROTHGEOCHAT = function(msg)
+	msg = strtrim(strlower(msg or ""))
+	if msg == "on" then
+		AzerothGeoChat_Toggle(true)
+	elseif msg == "off" then
+		AzerothGeoChat_Toggle(false)
+	elseif msg == "c" or msg == "convert" then
+		AzerothGeoChat_ConvertCurrentEditBox()
+	else
+		AzerothGeoChat_Toggle()
+	end
+end
+
+----------------------------------------------------------------------
+-- Font Configuration Helper
+----------------------------------------------------------------------
+local function SetupChatFont()
+	local fontFile = "Fonts\\ARIALN.ttf"
+	local fontObjects = {
+		ChatFontNormal,
+		ChatFontSmall,
+	}
+
+	for _, fontObj in ipairs(fontObjects) do
+		if fontObj then
+			pcall(function()
+				local _, size, flags = fontObj:GetFont()
+				fontObj:SetFont(fontFile, size or 14, flags)
+			end)
+		end
+	end
+
+	-- Apply font to chat frames and edit boxes
+	for i = 1, NUM_CHAT_WINDOWS do
+		local cf = _G["ChatFrame" .. i]
+		if cf and cf.GetFont then
+			pcall(function()
+				local _, size, flags = cf:GetFont()
+				cf:SetFont(fontFile, size or 14, flags)
+			end)
+		end
+		local eb = _G["ChatFrame" .. i .. "EditBox"]
+		if eb and eb.GetFont then
+			pcall(function()
+				local _, size, flags = eb:GetFont()
+				eb:SetFont(fontFile, size or 14, flags)
+			end)
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- Event Initialization
+----------------------------------------------------------------------
+local frame = CreateFrame("Frame")
+frame:RegisterEvent("PLAYER_LOGIN")
+frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("MAIL_SHOW")
+
+frame:SetScript("OnEvent", function(self, event, arg1)
+	if event == "PLAYER_LOGIN" then
+		if AzerothGeoChatDB.enabled == nil then
+			AzerothGeoChatDB.enabled = true
+		end
+		HookAllEditBoxes()
+		CreateAllToggleButtons()
+		SetupChatFont()
+
+		-- Hook third-party or dynamic chat activations (e.g. WIM, Chatter, Prat)
+		if ChatEdit_ActivateChat then
+			hooksecurefunc("ChatEdit_ActivateChat", function(editBox)
+				if editBox then
+					HookEditBox(editBox)
+					CreateToggleButton(editBox)
+					RefreshButtons()
+				end
+			end)
+		end
+
+		Print("v1.1.0 loaded. |cff00ff00/geo|r to toggle, |cff00ff00/geo c|r to convert text, |cff00ff00Right-Click [GEO]|r.")
+	elseif event == "ADDON_LOADED" and arg1 == "Blizzard_MacroUI" then
+		if MacroFrameText then
+			HookEditBox(MacroFrameText)
+		end
+	elseif event == "MAIL_SHOW" then
+		HookAllEditBoxes()
+	end
+end)

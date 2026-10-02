@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: AzerothGeoChat
+## Notes: Georgian Chat & Transliteration support for WoW 3.3.5a
+## Author: Azeroth Reborn
+## Version: 1.1.0
+## SavedVariablesPerCharacter: AzerothGeoChatDB
+Bindings.xml
+AzerothGeoChat.lua
