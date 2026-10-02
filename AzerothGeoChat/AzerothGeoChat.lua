@@ -1,16 +1,15 @@
 --[[--------------------------------------------------------------------
-	AzerothGeoChat v1.2.0
+	AzerothGeoChat v1.2.1
 	Georgian (Mkhedruli) chat transliteration & font support for WoW 3.3.5a
 	Author: Azeroth Reborn
 
 	Features:
 	- Transliterates English QWERTY keys into Georgian Unicode on the fly.
-	- Intercepts Windows Georgian layout '?' characters caused by DirectX 9
-	  ANSI limitations and restores the intended Georgian letters.
 	- Smart slash command and whisper protection (keeps player names in Latin).
 	- Preserves WoW hyperlinks (|c...|H...|h...|h|r).
 	- In-place text conversion (Latin <-> Georgian via right-click or /geo c).
 	- Bundled Sylfaen/Segoe UI fonts for clean Georgian glyph rendering.
+	- Positioned inside the chat input box on the right, fully draggable via Shift+Drag.
 ----------------------------------------------------------------------]]
 
 ----------------------------------------------------------------------
@@ -39,26 +38,6 @@ local GEO_MAP = {
 	["V"] = "ვ", ["I"] = "ი", ["K"] = "კ", ["L"] = "ლ", ["M"] = "მ",
 	["N"] = "ნ", ["O"] = "ო", ["P"] = "პ", ["U"] = "უ", ["F"] = "ფ",
 	["Q"] = "ქ", ["Y"] = "ყ", ["X"] = "ხ", ["H"] = "ჰ",
-}
-
--- Physical key mappings for when Windows sends '?' under Georgian keyboard layout
-local KEY_TO_GEO = {
-	["A"] = "ა", ["B"] = "ბ", ["G"] = "გ", ["D"] = "დ", ["E"] = "ე",
-	["V"] = "ვ", ["Z"] = "ზ", ["T"] = "ტ", ["I"] = "ი", ["K"] = "კ",
-	["L"] = "ლ", ["M"] = "მ", ["N"] = "ნ", ["O"] = "ო", ["P"] = "პ",
-	["J"] = "ჯ", ["R"] = "რ", ["S"] = "ს", ["U"] = "უ", ["F"] = "ფ",
-	["Q"] = "ქ", ["Y"] = "ყ", ["C"] = "ც", ["W"] = "წ", ["X"] = "ხ",
-	["H"] = "ჰ",
-}
-
-local SHIFT_KEY_TO_GEO = {
-	["T"] = "თ",
-	["J"] = "ჟ",
-	["R"] = "ღ",
-	["S"] = "შ",
-	["C"] = "ჩ",
-	["Z"] = "ძ",
-	["W"] = "ჭ",
 }
 
 -- Reverse mapping for Georgian -> Latin conversion
@@ -250,26 +229,20 @@ function AzerothGeoChat_ConvertCurrentEditBox()
 end
 
 ----------------------------------------------------------------------
--- Core Character Replacement (EditBox Hook)
+-- Core Character Replacement (EditBox OnChar Hook)
 ----------------------------------------------------------------------
+local warnedAboutLayout = false
+
 local function Geo_OnChar(self, char)
 	if not AzerothGeoChatDB.enabled then return end
 
-	local mapped = GEO_MAP[char]
-
-	-- If Windows Georgian layout sent '?' for an alphabetical keystroke:
-	if not mapped and char == "?" and self.lastKeyDown then
-		local key = self.lastKeyDown:upper()
-		local now = GetTime()
-		if (not self.lastKeyTime or (now - self.lastKeyTime) < 0.25) and key:match("^[A-Z]$") then
-			if self.lastKeyShift and SHIFT_KEY_TO_GEO[key] then
-				mapped = SHIFT_KEY_TO_GEO[key]
-			elseif KEY_TO_GEO[key] then
-				mapped = KEY_TO_GEO[key]
-			end
-		end
+	-- If Windows is set to Georgian layout, DirectX 9 sends raw '?'
+	if char == "?" and not warnedAboutLayout then
+		warnedAboutLayout = true
+		Print("|cffffcc00შენიშვნა:|r Windows-ში დატოვეთ ინგლისური |cff00ff00[EN]|r კლავიატურა! აკრიფეთ ინგლისურად (QWERTY) და ადონი თვითონ გადაიყვანს ქართულად.")
 	end
 
+	local mapped = GEO_MAP[char]
 	if not mapped then return end
 
 	local text = self:GetText() or ""
@@ -315,14 +288,6 @@ local function HookEditBox(box)
 
 	ApplyGeorgianFont(box)
 
-	local origKeyDown = box:GetScript("OnKeyDown")
-	box:SetScript("OnKeyDown", function(self, key)
-		self.lastKeyDown = key
-		self.lastKeyShift = IsShiftKeyDown()
-		self.lastKeyTime = GetTime()
-		if origKeyDown then origKeyDown(self, key) end
-	end)
-
 	local origChar = box:GetScript("OnChar")
 	box:SetScript("OnChar", function(self, char)
 		if origChar then origChar(self, char) end
@@ -347,7 +312,6 @@ end
 
 ----------------------------------------------------------------------
 -- UI Toggle Button ([GEO] / [ENG])
--- Positioned cleanly at the BOTTOM part of the chat box
 ----------------------------------------------------------------------
 local buttons = {}
 
@@ -370,10 +334,11 @@ local function CreateToggleButton(editBox)
 	editBox.AzerothGeoChatBtn = btn
 
 	btn:SetWidth(44)
-	btn:SetHeight(16)
+	btn:SetHeight(18)
 
-	-- Placed neatly at the BOTTOM part of the edit box (underneath the input box)
-	btn:SetPoint("TOPLEFT", editBox, "BOTTOMLEFT", 6, -2)
+	-- Place inside the editbox on the right side:
+	-- Always visible, never off-screen, never overlaps chat text!
+	btn:SetPoint("RIGHT", editBox, "RIGHT", -6, 0)
 	btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
 	btn:SetBackdrop({
@@ -382,12 +347,25 @@ local function CreateToggleButton(editBox)
 		tile = true, tileSize = 8, edgeSize = 8,
 		insets = { left = 2, right = 2, top = 2, bottom = 2 }
 	})
-	btn:SetBackdropColor(0, 0, 0, 0.8)
-	btn:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.9)
+	btn:SetBackdropColor(0, 0, 0, 0.85)
+	btn:SetBackdropBorderColor(0.4, 0.4, 0.4, 0.9)
 
 	local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	fs:SetPoint("CENTER", 0, 0)
 	btn:SetFontString(fs)
+
+	-- Allow moving with Shift + Drag
+	btn:SetMovable(true)
+	btn:EnableMouse(true)
+	btn:RegisterForDrag("LeftButton")
+	btn:SetScript("OnDragStart", function(self)
+		if IsShiftKeyDown() then
+			self:StartMoving()
+		end
+	end)
+	btn:SetScript("OnDragStop", function(self)
+		self:StopMovingOrSizing()
+	end)
 
 	btn:SetScript("OnClick", function(self, button)
 		if button == "RightButton" then
@@ -403,9 +381,10 @@ local function CreateToggleButton(editBox)
 	btn:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOP")
 		GameTooltip:AddLine("AzerothGeoChat", 0.2, 1.0, 0.6)
-		GameTooltip:AddLine("|cffffffffLeft-Click:|r Toggle Georgian / English input", 0.9, 0.9, 0.9)
-		GameTooltip:AddLine("|cffffffffRight-Click:|r Convert typed text (Latin <-> Geo)", 0.9, 0.9, 0.9)
-		GameTooltip:AddLine("|cff888888Slash commands: /geo, /geo c|r", 0.6, 0.6, 0.6)
+		GameTooltip:AddLine("|cffffffffLeft-Click:|r ჩართვა / გამორთვა (GEO / ENG)", 0.9, 0.9, 0.9)
+		GameTooltip:AddLine("|cffffffffRight-Click:|r აკრეფილი ტექსტის გადაყვანა (Latin <-> Geo)", 0.9, 0.9, 0.9)
+		GameTooltip:AddLine("|cffffffffShift + Drag:|r ღილაკის გადაადგილება ეკრანზე", 0.7, 0.7, 0.7)
+		GameTooltip:AddLine("|cff888888ბრძანებები: /geo, /geo c|r", 0.6, 0.6, 0.6)
 		GameTooltip:Show()
 	end)
 
@@ -483,7 +462,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 			end)
 		end
 
-		Print("v1.2.0 loaded. |cff00ff00/geo|r to toggle, |cff00ff00/geo c|r to convert text, |cff00ff00Right-Click [GEO]|r.")
+		Print("v1.2.1 loaded. |cff00ff00/geo|r to toggle, |cff00ff00/geo c|r to convert text, |cff00ff00Right-Click [GEO]|r.")
 	elseif event == "ADDON_LOADED" and arg1 == "Blizzard_MacroUI" then
 		if MacroFrameText then
 			HookEditBox(MacroFrameText)
